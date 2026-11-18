@@ -24,12 +24,16 @@ export interface Summary {
   unknown_population: number;
   covered_population: number;
   uncovered_population: number;
+  uncertain_population: number;
+  uncertain_potentially_covered: number;
+  covered_upper_population: number;
   covered_grid_count: number;
   unknown_grid_count: number;
+  uncertain_grid_count: number;
   computed_at?: string;
 }
 
-export type ShareStatus = "covered" | "uncovered" | "unknown";
+export type ShareStatus = "covered" | "uncovered" | "uncertain" | "unknown";
 
 export interface ShareRow {
   task_id: string;
@@ -137,10 +141,19 @@ export interface GridRow {
 }
 
 export interface ConnectorRow {
+  candidate_id: number;
   grid_id: string;
   node_id: string;
-  allocation_ratio: number;
-  revision_no: number;
+  allocation_ratio: number | null;
+  locate_method?: string;
+  error_radius_m?: number;
+  distance_to_node_m?: number;
+  road_class?: string | null;
+  road_version_id?: number | null;
+  crosses_barrier?: boolean;
+  disposition?: string | null;
+  disposition_reason?: string | null;
+  review_action?: string | null;
   source_title?: string;
 }
 
@@ -198,6 +211,8 @@ export interface ComparisonGrid {
   population_b: number;
   covered_pop_a: number;
   covered_pop_b: number;
+  uncertain_pop_a: number;
+  uncertain_pop_b: number;
   unknown_pop_a: number;
   unknown_pop_b: number;
   shelters_a: string[];
@@ -218,6 +233,8 @@ export interface Comparison {
     covered_b: number;
     unknown_a: number;
     unknown_b: number;
+    uncertain_a: number;
+    uncertain_b: number;
     coverage_rate_a: number;
     coverage_rate_b: number;
     rate_delta: number;
@@ -241,4 +258,80 @@ export interface Comparison {
   per_grid: ComparisonGrid[];
   warnings: string[];
   basis_checks: Record<string, boolean>;
+}
+
+/* ---------------------------------------------------------- 连接证据治理 -- */
+
+export type LocateMethod =
+  | "address_standardization"
+  | "manual_placement"
+  | "village_centroid";
+
+export type Disposition = "effective" | "weak" | "excluded";
+
+export interface CandidateView {
+  candidate_id: number;
+  grid_id: string;
+  node_id: string;
+  locate_method: LocateMethod;
+  error_radius_m: number;
+  distance_to_node_m: number;
+  allocation_ratio: number | null;
+  road_version_id: number | null;
+  road_class: "dead_end" | "local" | "arterial" | null;
+  crosses_barrier: boolean;
+  disposition: Disposition;
+  disposition_reason: string | null;
+  review_action: "confirm" | "reject" | "adjust_ratio" | null;
+  reviewer: string | null;
+  reviewed_at: string | null;
+  review_note: string | null;
+}
+
+export interface CandidateResultRow {
+  task_id: string;
+  grid_id: string;
+  candidate_id: number;
+  node_id: string;
+  reachable: boolean;
+  shelter_id: string | null;
+  arrival_time: string | null;
+  evidence_sufficient: boolean;
+  exclusion_reason: string | null;
+}
+
+export interface ConnectionVersion {
+  version_id: number;
+  fingerprint: string;
+  note: string | null;
+  created_at: string;
+}
+
+export interface ConnectionReview {
+  review_id: number;
+  candidate_id: number;
+  connection_version_id: number;
+  action: string;
+  ratio_override: number | null;
+  reviewer: string;
+  note: string | null;
+  reviewed_at: string;
+}
+
+export interface BarrierRow {
+  barrier_id: string;
+  name: string;
+  geometry: number[][];
+}
+
+export interface GridConnectionOverview {
+  grid_id: string;
+  name: string | null;
+  boundary_id: string | null;
+  candidate_count: number;
+  effective_count: number;
+  weak_count: number;
+  excluded_count: number;
+  ratio_sum: number;
+  unknown_code: string | null;
 }

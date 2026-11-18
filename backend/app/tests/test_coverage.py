@@ -71,9 +71,11 @@ def test_unknown_categories_are_separated_not_zero_or_full(db):
         cur.execute("SELECT * FROM coverage_summaries WHERE task_id=%s", (r["task_id"],))
         s = cur.fetchone()
         assert s["unknown_population"] > 0
-        # 未知不进入覆盖也不进入未覆盖（未覆盖只针对可定位份额）
+        # 未知与连接不确定都不进入覆盖也不进入未覆盖；人口总量恒等式：
+        # 总人口 = 确定可达 + 确定不可达 + 连接不确定 + 未知
         assert abs((s["covered_population"] + s["uncovered_population"]
-                    + s["unknown_population"]) - s["total_population"]) < 1e-6
+                    + s["uncertain_population"] + s["unknown_population"])
+                   - s["total_population"]) < 1e-6
 
 
 def test_wait_then_timeout_excluded_but_wait_inside_deadline_included(fresh_db):

@@ -63,3 +63,32 @@ class EventCreate(BaseModel):
     speed_limit_kmh: Optional[float] = None
     source_title: str = "临时上报事件"
     raw_text: str = ""
+
+
+class CandidateIngest(BaseModel):
+    """候选连接点接入：登记后立即物化新连接版本（此前情景不受影响）。"""
+
+    grid_id: str
+    node_id: str
+    locate_method: str  # address_standardization | manual_placement | village_centroid
+    error_radius_m: float = Field(ge=0)
+    geom_x: float
+    geom_y: float
+    allocation_ratio: Optional[float] = Field(default=None, gt=0, le=1)
+    source_title: str = "连接证据登记"
+    raw_text: str = ""
+
+
+class ReviewItem(BaseModel):
+    candidate_id: int
+    action: str  # confirm | reject | adjust_ratio
+    ratio_override: Optional[float] = Field(default=None, gt=0, le=1)
+    note: Optional[str] = None
+
+
+class ReviewBatchCreate(BaseModel):
+    """人工审核批次：整批物化为一个后续连接版本，不改写已发布情景。"""
+
+    reviews: list[ReviewItem]
+    reviewer: str = "analyst-ui"
+    note: str = ""

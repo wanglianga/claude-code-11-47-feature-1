@@ -1,9 +1,15 @@
 import type {
   ArrivalRow,
+  BarrierRow,
   CacheRow,
+  CandidateResultRow,
+  CandidateView,
   Comparison,
+  ConnectionReview,
+  ConnectionVersion,
   ConnectorRow,
   EdgeRevision,
+  GridConnectionOverview,
   GridRow,
   NodeRow,
   OpenWindow,
@@ -61,6 +67,17 @@ export const api = {
       shares: ShareRow[];
       connector_arrivals: Array<ArrivalRow | null>;
       task_edge_dependencies: Array<{ task_id: string; edge_id: string }>;
+      candidate_results: CandidateResultRow[];
+      connection_version_id: number | null;
+      candidates: CandidateView[];
+      bounds_impact: {
+        grid_uncertain_population: number;
+        counts_toward_upper_bound: boolean;
+        task_covered_lower: number;
+        task_covered_upper: number;
+        task_uncertain_population: number;
+        task_uncertain_potentially_covered: number;
+      } | null;
     }>(`/tasks/${taskId}/witness?grid_id=${encodeURIComponent(gridId)}`),
 
   releaseViewer: (taskId: string, viewerId: string) =>
@@ -106,9 +123,56 @@ export const api = {
     ),
 
   grids: (asOf: string) =>
-    request<{ grids: GridRow[]; connectors: ConnectorRow[] }>(
-      `/sources/grids?as_of=${encodeURIComponent(asOf)}`
+    request<{
+      grids: GridRow[];
+      connectors: ConnectorRow[];
+      connection_version_id: number;
+    }>(`/sources/grids?as_of=${encodeURIComponent(asOf)}`),
+
+  connectionVersion: () =>
+    request<{
+      current: ConnectionVersion;
+      versions: ConnectionVersion[];
+      reviews: ConnectionReview[];
+    }>("/connections/version"),
+
+  connectionGrids: () =>
+    request<{ version_id: number; grids: GridConnectionOverview[] }>(
+      "/connections/grids"
     ),
+
+  connectionCandidates: (gridId: string) =>
+    request<{
+      version_id: number;
+      grid_id: string;
+      candidates: CandidateView[];
+      shares: Array<{ candidate_id: number; node_id: string; ratio: number }>;
+      ratio_sum: number;
+      unknown_code: string | null;
+    }>(`/connections/candidates?grid_id=${encodeURIComponent(gridId)}`),
+
+  ingestCandidate: (payload: Record<string, unknown>) =>
+    request<{ candidate: CandidateView; version: ConnectionVersion }>(
+      "/connections/candidates",
+      { method: "POST", body: JSON.stringify(payload) }
+    ),
+
+  reviewCandidates: (payload: {
+    reviews: Array<{
+      candidate_id: number;
+      action: string;
+      ratio_override?: number | null;
+      note?: string;
+    }>;
+    reviewer: string;
+    note?: string;
+  }) =>
+    request<{ version: ConnectionVersion; applied: number; reviewer: string }>(
+      "/connections/reviews",
+      { method: "POST", body: JSON.stringify(payload) }
+    ),
+
+  barriers: () => request<{ barriers: BarrierRow[] }>("/connections/barriers"),
 
   compare: (taskA: string, taskB: string) =>
     request<Comparison>("/comparisons", {

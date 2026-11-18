@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS source_documents (
     doc_id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     dataset_type        TEXT NOT NULL CHECK (dataset_type IN
                         ('population','road_node','road_edge','shelter',
-                         'road_event','boundary')),
+                         'road_event','boundary','connection_evidence','barrier')),
     title               TEXT NOT NULL,
     source_org          TEXT,
     unit_note           TEXT,                     -- 原文计量单位说明
@@ -155,18 +155,65 @@ CREATE TABLE IF NOT EXISTS pop_grid_revisions (
 );
 CREATE INDEX IF NOT EXISTS idx_pop_rev_asof ON pop_grid_revisions(as_of_date);
 
--- 网格→路网连接位置与互斥分配比例；多出口网格按子份额切分人口
-CREATE TABLE IF NOT EXISTS grid_connectors (
-    connector_id        BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+-- ------------------------------------------- 人口—路网连接证据（治理后） --
+-- 遗留表 grid_connectors 已被候选连接点证据模型取代（见下），建库时显式删除。
+DROP TABLE IF EXISTS grid_connectors;
+
+-- 空间阻隔（河流等）：折线，用于判定“原始定位点→候选节点”是否跨河
+CREATE TABLE IF NOT EXISTS spatial_barriers (
+    barrier_id          TEXT PRIMARY KEY,
+    name                TEXT NOT NULL,
+    geometry            JSONB NOT NULL,            -- [[x,y],...] 折线
+    source_doc_id       BIGINT REFERENCES source_documents(doc_id),
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 连接证据版本：候选集合 + 人工审核集合的物化快照。
+-- 情景签名引用版本号；审核/新候选只形成后续版本，不改写既有情景与发布。
+CREATE TABLE IF NOT EXISTS connection_versions (
+    version_id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    fingerprint         TEXT NOT NULL,             -- 候选+审核内容指纹（不含版本号）
+    note                TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 网格候选连接点（证据行，不可变；纠正通过新候选/审核留痕）
+CREATE TABLE IF NOT EXISTS grid_connection_candidates (
+    candidate_id        BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     grid_id             TEXT NOT NULL REFERENCES pop_grids(grid_id),
     node_id             TEXT NOT NULL REFERENCES road_nodes(node_id),
-    allocation_ratio    DOUBLE PRECISION NOT NULL CHECK
-                        (allocation_ratio > 0 AND allocation_ratio <= 1),
-    revision_no         INTEGER NOT NULL DEFAULT 1,
+    locate_method       TEXT NOT NULL CHECK (locate_method IN
+                        ('address_standardization','manual_placement','village_centroid')),
+    error_radius_m      DOUBLE PRECISION NOT NULL CHECK (error_radius_m >= 0),
+    geom_x              DOUBLE PRECISION NOT NULL,  -- 原始定位点（未吸附节点前）
+    geom_y              DOUBLE PRECISION NOT NULL,
+    distance_to_node_m  DOUBLE PRECISION NOT NULL,  -- 原始定位点到候选节点的直线距离
+    allocation_ratio    DOUBLE PRECISION CHECK      -- 互斥份额权重；NULL=未配权重
+                        (allocation_ratio IS NULL OR
+                         (allocation_ratio > 0 AND allocation_ratio <= 1)),
+    road_version_id     BIGINT REFERENCES road_network_versions(version_id), -- 候选依据的道路版本
+    road_class          TEXT,                       -- 接入点道路等级：dead_end/local/arterial（按该版本出度）
+    crosses_barrier     BOOLEAN NOT NULL DEFAULT FALSE, -- 原始定位点→候选节点连线跨越河流阻隔
     source_doc_id       BIGINT REFERENCES source_documents(doc_id),
-    UNIQUE (grid_id, node_id, revision_no)
+    introduced_version_id BIGINT REFERENCES connection_versions(version_id), -- 进入证据集的版本
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS idx_connector_grid ON grid_connectors(grid_id);
+CREATE INDEX IF NOT EXISTS idx_candidate_grid ON grid_connection_candidates(grid_id);
+
+-- 人工确认记录（追加式；每个审核批次物化为新连接版本）
+CREATE TABLE IF NOT EXISTS connection_reviews (
+    review_id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    candidate_id        BIGINT NOT NULL REFERENCES grid_connection_candidates(candidate_id),
+    connection_version_id BIGINT REFERENCES connection_versions(version_id), -- 所属版本（物化时回填）
+    action              TEXT NOT NULL CHECK (action IN ('confirm','reject','adjust_ratio')),
+    ratio_override      DOUBLE PRECISION CHECK
+                        (ratio_override IS NULL OR
+                         (ratio_override > 0 AND ratio_override <= 1)),
+    reviewer            TEXT NOT NULL,
+    note                TEXT,
+    reviewed_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_review_candidate ON connection_reviews(candidate_id);
 
 -- ------------------------------------------------- 路网版本（资料截止点） --
 CREATE TABLE IF NOT EXISTS road_network_versions (
@@ -189,6 +236,7 @@ CREATE TABLE IF NOT EXISTS scenarios (
     road_cutoff         TIMESTAMPTZ NOT NULL,        -- 道路资料截止点
     boundary_id         TEXT REFERENCES region_boundaries(boundary_id),  -- 分析边界，NULL=全部
     graph_version_id    BIGINT REFERENCES road_network_versions(version_id),
+    connection_version_id BIGINT REFERENCES connection_versions(version_id), -- 固定连接证据版本
     signature           TEXT NOT NULL UNIQUE,        -- 完整输入的情景签名
     evidence_cutoff_at  TIMESTAMPTZ NOT NULL,        -- 随结果标注的证据截止时间
     created_by          TEXT NOT NULL DEFAULT 'analyst',
@@ -256,6 +304,8 @@ CREATE TABLE IF NOT EXISTS node_arrivals (
 
 -- ---------------------------------------------------------------- 网格份额结果 --
 -- 每个互斥子份额一行；covered 去重在汇总阶段完成，同一网格只计一次。
+-- status='uncertain' 的行为“连接不确定”汇总块：人口不按候选重复计数，
+-- 各候选的路径评估留痕在 grid_candidate_results。
 CREATE TABLE IF NOT EXISTS grid_share_results (
     task_id             UUID NOT NULL REFERENCES compute_tasks(task_id),
     grid_id             TEXT NOT NULL,
@@ -269,23 +319,43 @@ CREATE TABLE IF NOT EXISTS grid_share_results (
     total_wait_sec      DOUBLE PRECISION NOT NULL DEFAULT 0,
     witness_edge_path   JSONB,
     status              TEXT NOT NULL CHECK (status IN
-                        ('covered','uncovered','unknown')),
-    reason              TEXT,                        -- 被排除/未知原因
+                        ('covered','uncovered','uncertain','unknown')),
+    reason              TEXT,                        -- 被排除/未知/不确定原因
+    candidate_id        BIGINT,                      -- 该份额对应的候选连接点（确定份额）
     evidence_cutoff_at  TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (task_id, grid_id, share_index)
 );
 CREATE INDEX IF NOT EXISTS idx_share_task ON grid_share_results(task_id);
 
+-- 连接不确定块的候选评估留痕：每个不确定候选的路径计算结果一行
+CREATE TABLE IF NOT EXISTS grid_candidate_results (
+    task_id             UUID NOT NULL REFERENCES compute_tasks(task_id),
+    grid_id             TEXT NOT NULL,
+    candidate_id        BIGINT NOT NULL,
+    node_id             TEXT NOT NULL,
+    reachable           BOOLEAN NOT NULL,
+    shelter_id          TEXT,
+    arrival_time        TIMESTAMPTZ,
+    evidence_sufficient BOOLEAN NOT NULL,            -- 证据是否充分（弱证据仅参与上下界）
+    exclusion_reason    TEXT,                        -- 评估期排除原因（如节点不在该路网版本）
+    PRIMARY KEY (task_id, grid_id, candidate_id)
+);
+CREATE INDEX IF NOT EXISTS idx_cand_result_task ON grid_candidate_results(task_id);
+
 -- ---------------------------------------------------------------- 覆盖汇总 --
 CREATE TABLE IF NOT EXISTS coverage_summaries (
     task_id             UUID PRIMARY KEY REFERENCES compute_tasks(task_id),
     total_population    DOUBLE PRECISION NOT NULL,   -- 边界内全部分母
-    located_population  DOUBLE PRECISION NOT NULL,   -- 可定位到路网的人口
+    located_population  DOUBLE PRECISION NOT NULL,   -- 证据充分、可确定分类的人口（确定可达+确定不可达）
     unknown_population  DOUBLE PRECISION NOT NULL,   -- 无连接/缺分配依据
-    covered_population  DOUBLE PRECISION NOT NULL,   -- 网格级去重后覆盖
-    uncovered_population DOUBLE PRECISION NOT NULL,
+    covered_population  DOUBLE PRECISION NOT NULL,   -- 确定可达（网格级去重后）
+    uncovered_population DOUBLE PRECISION NOT NULL,  -- 确定不可达（证据充分但路径不通）
+    uncertain_population DOUBLE PRECISION NOT NULL DEFAULT 0,        -- 连接不确定
+    uncertain_potentially_covered DOUBLE PRECISION NOT NULL DEFAULT 0, -- 不确定中任一候选可达（计入覆盖上界）
+    covered_upper_population DOUBLE PRECISION NOT NULL DEFAULT 0,    -- 覆盖上界 = 确定可达 + 不确定可达
     covered_grid_count  INTEGER NOT NULL,
     unknown_grid_count  INTEGER NOT NULL,
+    uncertain_grid_count INTEGER NOT NULL DEFAULT 0,
     computed_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -302,3 +372,28 @@ CREATE TABLE IF NOT EXISTS publications (
     created_by          TEXT NOT NULL DEFAULT 'analyst',
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ============================================================================
+-- 幂等迁移：为连接证据治理之前建立的既有库补齐新结构（新库由上方 DDL 直接建成）
+-- ============================================================================
+ALTER TABLE source_documents DROP CONSTRAINT IF EXISTS source_documents_dataset_type_check;
+ALTER TABLE source_documents ADD CONSTRAINT source_documents_dataset_type_check
+    CHECK (dataset_type IN ('population','road_node','road_edge','shelter',
+                            'road_event','boundary','connection_evidence','barrier'));
+
+ALTER TABLE scenarios ADD COLUMN IF NOT EXISTS connection_version_id
+    BIGINT REFERENCES connection_versions(version_id);
+
+ALTER TABLE grid_share_results DROP CONSTRAINT IF EXISTS grid_share_results_status_check;
+ALTER TABLE grid_share_results ADD CONSTRAINT grid_share_results_status_check
+    CHECK (status IN ('covered','uncovered','uncertain','unknown'));
+ALTER TABLE grid_share_results ADD COLUMN IF NOT EXISTS candidate_id BIGINT;
+
+ALTER TABLE coverage_summaries ADD COLUMN IF NOT EXISTS uncertain_population
+    DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE coverage_summaries ADD COLUMN IF NOT EXISTS uncertain_potentially_covered
+    DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE coverage_summaries ADD COLUMN IF NOT EXISTS covered_upper_population
+    DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE coverage_summaries ADD COLUMN IF NOT EXISTS uncertain_grid_count
+    INTEGER NOT NULL DEFAULT 0;

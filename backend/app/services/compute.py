@@ -21,6 +21,7 @@ from typing import Any, Optional
 import redis
 
 from ..config import settings
+from .connection import get_current_connection_version
 from .coverage import CoverageEngine
 from .snapshot import (
     get_or_create_network_version,
@@ -81,9 +82,11 @@ class ComputeManager:
         boundary_id: Optional[str] = None,
     ) -> dict[str, Any]:
         version = get_or_create_network_version(conn, road_cutoff)
+        # 固定当前连接证据版本：此后到达的人工确认只形成后续版本，不改写本情景
+        conn_version = get_current_connection_version(conn)
         signature = scenario_signature(
             population_as_of, departure_time, max_trip_minutes,
-            version["version_id"], boundary_id,
+            version["version_id"], boundary_id, conn_version["version_id"],
         )
         lock = _signature_lock(signature)
         with lock:  # 同签名并发请求串行化，第二个请求直接复用任务
@@ -95,6 +98,7 @@ class ComputeManager:
                 max_trip_minutes=max_trip_minutes,
                 road_cutoff=road_cutoff,
                 version=version,
+                connection_version=conn_version,
                 signature=signature,
                 viewer_id=viewer_id,
                 kind=kind,
@@ -104,7 +108,7 @@ class ComputeManager:
 
     def _get_or_create_locked(
         self, conn, *, name, population_as_of, departure_time, max_trip_minutes,
-        road_cutoff, version, signature, viewer_id, kind, note, boundary_id,
+        road_cutoff, version, connection_version, signature, viewer_id, kind, note, boundary_id,
     ) -> dict[str, Any]:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM scenarios WHERE signature=%s", (signature,))
@@ -115,10 +119,12 @@ class ComputeManager:
                     """INSERT INTO scenarios
                            (scenario_id, name, population_as_of, departure_time,
                             max_trip_minutes, road_cutoff, boundary_id, graph_version_id,
-                            signature, evidence_cutoff_at, created_by, note)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'analyst',%s) RETURNING *""",
+                            connection_version_id, signature, evidence_cutoff_at,
+                            created_by, note)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'analyst',%s) RETURNING *""",
                     (scenario_id, name, population_as_of, departure_time, max_trip_minutes,
-                     road_cutoff, boundary_id, version["version_id"], signature,
+                     road_cutoff, boundary_id, version["version_id"],
+                     connection_version["version_id"], signature,
                      road_cutoff, note),
                 )
                 scenario = cur.fetchone()
@@ -181,7 +187,8 @@ class ComputeManager:
             conn.commit()
 
         self._run_task(conn, task_id, version["version_id"], departure_time,
-                       max_trip_minutes, population_as_of, road_cutoff, boundary_id)
+                       max_trip_minutes, population_as_of, road_cutoff, boundary_id,
+                       connection_version_id=connection_version["version_id"])
         return {
             "scenario": scenario,
             "task_id": task_id,
@@ -228,7 +235,7 @@ class ComputeManager:
     # -------------------------------------------------------- 任务执行 --
     def _run_task(self, conn, task_id, version_id, departure_time,
                   max_trip_minutes, population_as_of, evidence_cutoff,
-                  boundary_id=None) -> None:
+                  boundary_id=None, connection_version_id=None) -> None:
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE compute_tasks SET status='running', started_at=now() "
@@ -244,6 +251,7 @@ class ComputeManager:
                 "departure_time": departure_time,
                 "deadline": deadline,
                 "evidence_cutoff_at": evidence_cutoff,
+                "connection_version_id": connection_version_id,
             }
             summary = CoverageEngine(
                 conn, snapshot, task, population_as_of, boundary_id=boundary_id

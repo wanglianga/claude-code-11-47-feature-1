@@ -24,10 +24,20 @@ def main():
     ta = a["task_id"]
     with conn.cursor() as cur:
         cur.execute("SELECT * FROM coverage_summaries WHERE task_id=%s", (ta,))
-        print("A summary:", cur.fetchone())
+        s = cur.fetchone()
+        print("A summary:", s)
+        assert abs(s["covered_population"] + s["uncovered_population"]
+                   + s["uncertain_population"] + s["unknown_population"]
+                   - s["total_population"]) < 1e-6, "人口守恒恒等式被破坏"
         cur.execute(
             "SELECT grid_id, status, share_population, reason, shelter_id, arrival_time "
             "FROM grid_share_results WHERE task_id=%s ORDER BY grid_id, share_index", (ta,))
+        for r in cur.fetchall():
+            print(" ", r)
+        cur.execute(
+            "SELECT grid_id, node_id, reachable, shelter_id, exclusion_reason "
+            "FROM grid_candidate_results WHERE task_id=%s ORDER BY grid_id, candidate_id", (ta,))
+        print("A candidate evals:")
         for r in cur.fetchall():
             print(" ", r)
 

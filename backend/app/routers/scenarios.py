@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from ..schemas_api import ScenarioCreate, ViewerRelease
 from ..services.compute import manager
+from ..services.connection import resolve_connections
 from .deps import get_db, jsonable
 
 router = APIRouter(tags=["情景与覆盖"])
@@ -87,7 +88,7 @@ def task_arrivals(task_id: str, conn=Depends(get_db)):
 
 @router.get("/tasks/{task_id}/witness")
 def task_witness(task_id: str, grid_id: str, conn=Depends(get_db)):
-    """单网格下钻：份额、出发/到达时刻、见证边路径、等待与被排除原因。"""
+    """单网格下钻：份额、候选连接点、排除原因、到发时刻、见证边路径与上下界影响。"""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT * FROM grid_share_results WHERE task_id=%s AND grid_id=%s "
@@ -110,8 +111,60 @@ def task_witness(task_id: str, grid_id: str, conn=Depends(get_db)):
             (task_id,),
         )
         deps = cur.fetchall()
-    return jsonable({"grid_id": grid_id, "shares": shares, "connector_arrivals": arrivals,
-                     "task_edge_dependencies": deps})
+        # 连接不确定块的候选路径评估留痕
+        cur.execute(
+            "SELECT * FROM grid_candidate_results WHERE task_id=%s AND grid_id=%s "
+            "ORDER BY candidate_id",
+            (task_id, grid_id),
+        )
+        candidate_results = cur.fetchall()
+        # 任务固定的连接证据版本（结果解释必须回到同一版本）
+        cur.execute(
+            """SELECT s.connection_version_id
+               FROM compute_tasks t JOIN scenarios s ON s.scenario_id = t.scenario_id
+               WHERE t.task_id=%s""",
+            (task_id,),
+        )
+        row = cur.fetchone()
+        connection_version_id = row["connection_version_id"] if row else None
+        # 该网格不确定块对总覆盖上下界的影响
+        cur.execute(
+            """SELECT covered_population, covered_upper_population,
+                      uncertain_population, uncertain_potentially_covered
+               FROM coverage_summaries WHERE task_id=%s""",
+            (task_id,),
+        )
+        summary = cur.fetchone()
+
+    candidates = []
+    if connection_version_id is not None:
+        state = resolve_connections(conn, connection_version_id).get(grid_id)
+        if state is not None:
+            candidates = state["candidates"]
+
+    uncertain_block = next((s for s in shares if s["status"] == "uncertain"), None)
+    bounds_impact = None
+    if summary is not None and uncertain_block is not None:
+        any_reachable = any(c["reachable"] for c in candidate_results)
+        bounds_impact = {
+            "grid_uncertain_population": uncertain_block["share_population"],
+            "counts_toward_upper_bound": bool(any_reachable),
+            "task_covered_lower": summary["covered_population"],
+            "task_covered_upper": summary["covered_upper_population"],
+            "task_uncertain_population": summary["uncertain_population"],
+            "task_uncertain_potentially_covered": summary["uncertain_potentially_covered"],
+        }
+
+    return jsonable({
+        "grid_id": grid_id,
+        "shares": shares,
+        "connector_arrivals": arrivals,
+        "task_edge_dependencies": deps,
+        "candidate_results": candidate_results,
+        "connection_version_id": connection_version_id,
+        "candidates": candidates,
+        "bounds_impact": bounds_impact,
+    })
 
 
 @router.post("/tasks/{task_id}/release")

@@ -20,6 +20,17 @@ C1 截止点 EV3 为“尚未恢复”的封路 → G8 不可覆盖；C2 修订�
   - G6 两次人口修订 → 共同分母对比中的人口资料变化；
   - G7 属于另一边界 → 分析边界变化；
   - 截止点 C2 录入 E7 重开与新封路 → 缓存失效与恢复重算。
+
+连接证据治理样例（GR 系列，清河 RIVER1 沿 y=-600 横贯）：
+  - GR1 河岸村片：低精度村级质心候选跨河指向最近节点 N1（自动排除，
+    禁止按最近直线距离默认接入），另有地址标准化候选接入同侧 N9 → 确定分类；
+  - GR2 南堰村片：仅低精度村级质心候选 → 整格连接不确定，人工确认后转确定；
+  - GR3 误标片：地址标准化误接到孤屯 N8（确定不可达），人工纠正接入 N3 后
+    形成新连接版本，旧情景与发布不被改写；
+  - GR4 双候选片：最近直线距离是断头路 N11，主干路候选在 N6，两者均未配
+    互斥权重 → 整格连接不确定，上界含 N6 可达性，人口只计一次；
+  - GR5 东站引道片：弱证据候选接 N4，C1 时 E7 未恢复 → 不确定且上界为 0；
+    C2 重开且 60 分钟时限 → 上界包含该片人口（道路修复后的重新计算）。
 """
 from __future__ import annotations
 
@@ -56,9 +67,11 @@ def reseed(conn) -> None:
         cur.execute(
             """
             TRUNCATE TABLE
-                grid_share_results, node_arrivals, coverage_summaries,
-                coverage_cache_index, compute_task_viewers, task_edge_dependencies,
-                compute_tasks, publications, scenarios, grid_connectors,
+                grid_candidate_results, grid_share_results, node_arrivals,
+                coverage_summaries, coverage_cache_index, compute_task_viewers,
+                task_edge_dependencies, compute_tasks, publications, scenarios,
+                connection_reviews, grid_connection_candidates, connection_versions,
+                spatial_barriers,
                 pop_grid_revisions, pop_grids, shelter_open_windows, shelters,
                 road_event_revisions, road_events, road_event_registry,
                 road_edge_revisions, road_nodes,
@@ -70,6 +83,7 @@ def reseed(conn) -> None:
     _seed_documents_and_network(conn)
     _seed_shelters(conn)
     _seed_population(conn)
+    _seed_connection_evidence(conn)
     conn.commit()
 
 
@@ -109,6 +123,9 @@ def _seed_documents_and_network(conn) -> None:
             ("N6", "南门广场", 2000, 1000, True),
             ("N7", "火车东站", 4000, 0, True),
             ("N8", "孤屯", -1000, 0, False),
+            ("N9", "南岸村口", 1200, -1000, False),
+            ("N10", "南堰村口", 1500, -800, False),
+            ("N11", "港尾路尾", 2300, 1100, False),
         ]
         cur.executemany(
             "INSERT INTO road_nodes (node_id, name, geom_x, geom_y, allow_wait, source_doc_id) "
@@ -116,24 +133,39 @@ def _seed_documents_and_network(conn) -> None:
             [(nid, name, x, y, wait, node_doc) for nid, name, x, y, wait in nodes],
         )
 
-        # (edge_id, from, to)；全部 1000m / 60kmh → 1 分钟，边方向即通行方向
+        # (edge_id, from, to)；除标注外全部 1000m / 60kmh → 1 分钟，边方向即通行方向
         edges = [
-            ("E1", "N1", "N2"),   # 单向边：无 E1 反向
-            ("E2", "N2", "N3"),
-            ("E3", "N3", "N4"),
-            ("E4", "N2", "N5"),
-            ("E5", "N5", "N6"),
-            ("E6", "N6", "N4"),
-            ("E7", "N4", "N7"),
-            ("E8", "N6", "N3"),
+            ("E1", "N1", "N2", 1000),   # 单向边：无 E1 反向
+            ("E2", "N2", "N3", 1000),
+            ("E3", "N3", "N4", 1000),
+            ("E4", "N2", "N5", 1000),
+            ("E5", "N5", "N6", 1000),
+            ("E6", "N6", "N4", 1000),
+            ("E7", "N4", "N7", 1000),
+            ("E8", "N6", "N3", 1000),
+            ("E9", "N9", "N2", 1020),   # 南岸村跨河桥（车行）
+            ("E10", "N10", "N2", 940),  # 南堰村跨河桥（车行）
+            ("E11", "N6", "N11", 300),  # 港尾路：驶入断头路，N11 无出边
         ]
         cur.executemany(
             """INSERT INTO road_edge_revisions
                    (edge_id, revision_no, from_node, to_node, length_m, base_speed_kmh,
                     valid_from, source_doc_id)
-               VALUES (%s,1,%s,%s,1000,60,%s,%s)""",
-            [(eid, f, t, datetime(2026, 6, 1, tzinfo=UTC), edge_doc)
-             for eid, f, t in edges],
+               VALUES (%s,1,%s,%s,%s,60,%s,%s)""",
+            [(eid, f, t, length, datetime(2026, 6, 1, tzinfo=UTC), edge_doc)
+             for eid, f, t, length in edges],
+        )
+
+        # 空间阻隔：清河沿 y=-600 横贯（候选接入的跨河判定依据）
+        barrier_doc = _add_doc(
+            cur, "barrier", "水系与行洪阻隔图册", "坐标单位：米（折线）",
+            datetime(2026, 5, 20, tzinfo=UTC), C1,
+            raw="清河 RIVER1：沿 y=-600 横贯主城区，仅桥梁处可通行",
+        )
+        cur.execute(
+            "INSERT INTO spatial_barriers (barrier_id, name, geometry, source_doc_id) "
+            "VALUES (%s,%s,%s,%s)",
+            ("RIVER1", "清河", Json([[-1500, -600], [4500, -600]]), barrier_doc),
         )
 
         ev_doc1 = _add_doc(
@@ -213,11 +245,6 @@ def _seed_population(conn) -> None:
             datetime(2026, 7, 14, tzinfo=UTC), revision=2, supersedes=doc_v1,
             raw="修订 v2：G6 新交付小区入住，人口 1000 → 1200",
         )
-        conn_doc = _add_doc(
-            cur, "population", "网格—路网连接与人口分配比例调查", "比例：无量纲，互斥子份额",
-            datetime(2026, 6, 20, tzinfo=UTC), C1,
-            raw="多出口网格按实测出口选择比例切分，份额互斥；比例之和不足 1 的缺口记为分配依据缺失",
-        )
 
         # grid_id, name, x, y, boundary, pop_v1, pop_v2(None=不修订)
         grids = [
@@ -229,6 +256,11 @@ def _seed_population(conn) -> None:
             ("G6", "网格 G6（人口修订片）", 200, -100, "B_MAIN", 1000, 1200),
             ("G7", "网格 G7（扩展区片）", 5200, 500, "B_EXT", 600, None),
             ("G8", "网格 G8（东站片，待恢复）", 3200, 200, "B_MAIN", 700, None),
+            ("GR1", "网格 GR1（河岸村，质心跨河）", 400, -700, "B_MAIN", 650, None),
+            ("GR2", "网格 GR2（南堰村，村级质心）", 1480, -820, "B_MAIN", 900, None),
+            ("GR3", "网格 GR3（误标片，待人工纠正）", -950, 50, "B_MAIN", 450, None),
+            ("GR4", "网格 GR4（断头路与主干路双候选）", 2250, 1080, "B_MAIN", 620, None),
+            ("GR5", "网格 GR5（东站引道片，弱证据）", 3300, -300, "B_MAIN", 750, None),
         ]
         cur.executemany(
             "INSERT INTO pop_grids (grid_id, name, geom_x, geom_y, boundary_id, source_doc_id) "
@@ -246,22 +278,73 @@ def _seed_population(conn) -> None:
             rev_rows,
         )
 
-        # 连接与互斥分配比例
-        connectors = [
-            ("G1", "N6", 1.0),                       # 单出口；N6 即 S2，且可到 S1 → 多点重叠
-            ("G2", "N2", 0.6), ("G2", "N5", 0.4),    # 双出口互斥份额 300/200
-            # G3 无连接 → unknown_no_connector
-            ("G4", "N1", 0.7),                       # 缺口 0.3 → 240 人 unknown_allocation_gap
-            ("G5", "N1", 0.6), ("G5", "N2", 0.6),    # 和 1.2 > 1 → 整格 unknown_ratio_over_one
-            ("G6", "N1", 1.0),
-            ("G7", "N5", 1.0),
-            ("G8", "N4", 1.0),                       # 仅 E7 一条出口，恢复前不可覆盖
-        ]
-        cur.executemany(
-            """INSERT INTO grid_connectors (grid_id, node_id, allocation_ratio, revision_no, source_doc_id)
-               VALUES (%s,%s,%s,1,%s)""",
-            [(g, n, r, conn_doc) for g, n, r in connectors],
+
+def _seed_connection_evidence(conn) -> None:
+    """网格—路网候选连接点（证据治理模型）：每个候选带定位方法、误差范围、
+    原始定位点、道路版本与空间质检标记；人工确认记录初始为空。
+
+    候选的道路版本统一锚定 C1 路网版本；初始证据集不在此种子里物化版本，
+    首次使用时由 get_current_connection_version 统一物化（保证大区样例追加后
+    仍落入同一初始版本）。
+    """
+    from .services.evidence import ingest_candidate
+    from .services.snapshot import get_or_create_network_version
+
+    with conn.cursor() as cur:
+        conn_doc = _add_doc(
+            cur, "connection_evidence", "网格—路网连接与人口分配比例调查", "比例：无量纲，互斥子份额",
+            datetime(2026, 6, 20, tzinfo=UTC), C1,
+            raw="多出口网格按实测出口选择比例切分，份额互斥；比例之和不足 1 的缺口记为分配依据缺失",
         )
+        village_doc = _add_doc(
+            cur, "connection_evidence", "村级质心低精度定位成果", "定位方法：村级质心；误差：百米级",
+            datetime(2026, 6, 25, tzinfo=UTC), C1,
+            raw="沿河分散居住网格仅有村级质心，精度低，跨河候选需人工核实后方可作为接入依据",
+        )
+        addr_doc = _add_doc(
+            cur, "connection_evidence", "地址标准化接入成果", "定位方法：地址标准化；误差：数十米级",
+            datetime(2026, 6, 26, tzinfo=UTC), C1,
+            raw="门牌地址标准化落点；个别记录存在同名误标，需人工审核确认",
+        )
+        conn.commit()
+
+    road_version = get_or_create_network_version(conn, C1)
+    rv = road_version["version_id"]
+
+    # (grid, node, method, error_m, raw_x, raw_y, ratio, doc)
+    candidates = [
+        # —— 基线网格：调查成果（人工落点，小误差，互斥比例）——
+        ("G1", "N6", "manual_placement", 25, 2000, 800, 1.0, conn_doc),
+        ("G2", "N2", "manual_placement", 25, 1000, 500, 0.6, conn_doc),
+        ("G2", "N5", "manual_placement", 25, 1000, 500, 0.4, conn_doc),
+        # G3 无任何候选 → unknown_no_connector
+        ("G4", "N1", "manual_placement", 25, 200, 200, 0.7, conn_doc),
+        ("G5", "N1", "manual_placement", 25, 300, -300, 0.6, conn_doc),
+        ("G5", "N2", "manual_placement", 25, 300, -300, 0.6, conn_doc),
+        ("G6", "N1", "manual_placement", 25, 200, -100, 1.0, conn_doc),
+        ("G7", "N5", "manual_placement", 25, 5200, 500, 1.0, conn_doc),
+        ("G8", "N4", "manual_placement", 25, 3200, 200, 1.0, conn_doc),
+        # —— GR1：低精度村级质心跨河指向 *直线距离最近* 的 N1（自动排除）+ 地址标准化接同侧 N9 ——
+        ("GR1", "N1", "village_centroid", 600, 400, -700, None, village_doc),
+        ("GR1", "N9", "address_standardization", 30, 400, -700, 1.0, addr_doc),
+        # —— GR2：仅村级质心弱证据 → 整格连接不确定 ——
+        ("GR2", "N10", "village_centroid", 800, 1480, -820, None, village_doc),
+        # —— GR3：地址标准化误标到孤屯 N8（确定不可达），待人工纠正 ——
+        ("GR3", "N8", "address_standardization", 80, -950, 50, 1.0, addr_doc),
+        # —— GR4：最近直线距离是断头路 N11，主干路候选在 N6；均未配互斥权重 ——
+        ("GR4", "N11", "address_standardization", 60, 2250, 1080, None, addr_doc),
+        ("GR4", "N6", "address_standardization", 60, 2250, 1080, None, addr_doc),
+        # —— GR5：弱证据候选接 N4，E7 恢复与否决定上界 ——
+        ("GR5", "N4", "village_centroid", 450, 3300, -300, None, village_doc),
+    ]
+    for grid_id, node_id, method, err, x, y, ratio, doc in candidates:
+        ingest_candidate(
+            conn,
+            grid_id=grid_id, node_id=node_id, locate_method=method,
+            error_radius_m=err, geom_x=x, geom_y=y,
+            allocation_ratio=ratio, road_version_id=rv, source_doc_id=doc,
+        )
+    conn.commit()
 
 
 # ----------------------------------------------------------- 较大样例 --
@@ -413,6 +496,10 @@ def seed_large(conn) -> None:
             )
 
         # 40 个网格，连接到确定性的节点对；第 40 个刻意无连接 → 未知
+        from .services.evidence import ingest_candidate
+        from .services.snapshot import get_or_create_network_version
+
+        rv = get_or_create_network_version(conn, C1)["version_id"]
         for k in range(40):
             gid = f"GL{k:02d}"
             i, j = divmod(k, 8)
@@ -427,11 +514,13 @@ def seed_large(conn) -> None:
                 (gid, 500 + (k * 37) % 900, date(2026, 6, 1), doc),
             )
             if k != 39:
-                cur.execute(
-                    "INSERT INTO grid_connectors (grid_id, node_id, allocation_ratio, source_doc_id) "
-                    "VALUES (%s,%s,1.0,%s) ON CONFLICT DO NOTHING",
-                    (gid, f"L{i}{j}", doc),
+                ingest_candidate(
+                    conn,
+                    grid_id=gid, node_id=f"L{i}{j}", locate_method="manual_placement",
+                    error_radius_m=25, geom_x=10000 + j * 800, geom_y=9700 + i * 800,
+                    allocation_ratio=1.0, road_version_id=rv, source_doc_id=doc,
                 )
+    conn.commit()
 
 
 if __name__ == "__main__":

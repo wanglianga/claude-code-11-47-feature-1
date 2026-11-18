@@ -24,6 +24,7 @@ def _task_grid_views(conn, task_id: str) -> dict[str, dict]:
             SELECT grid_id,
                    SUM(share_population) FILTER (WHERE status='covered')   AS covered_pop,
                    SUM(share_population) FILTER (WHERE status='uncovered') AS uncovered_pop,
+                   SUM(share_population) FILTER (WHERE status='uncertain') AS uncertain_pop,
                    SUM(share_population) FILTER (WHERE status='unknown')   AS unknown_pop,
                    BOOL_OR(reachable) AS any_reachable,
                    ARRAY_AGG(reason) FILTER (WHERE reason IS NOT NULL)     AS reasons,
@@ -39,6 +40,7 @@ def _task_grid_views(conn, task_id: str) -> dict[str, dict]:
         r["grid_id"]: {
             "covered_pop": float(r["covered_pop"] or 0.0),
             "uncovered_pop": float(r["uncovered_pop"] or 0.0),
+            "uncertain_pop": float(r["uncertain_pop"] or 0.0),
             "unknown_pop": float(r["unknown_pop"] or 0.0),
             "reasons": [x for x in (r["reasons"] or []) if x],
             "shelters": [x for x in (r["shelters"] or []) if x],
@@ -54,6 +56,7 @@ def _scenario_context(conn, task_id: str) -> dict[str, Any]:
             SELECT t.task_id, t.evidence_cutoff_at, t.graph_version_id, t.kind, t.stale,
                    s.scenario_id, s.name, s.population_as_of, s.departure_time,
                    s.max_trip_minutes, s.road_cutoff, s.signature, s.boundary_id,
+                   s.connection_version_id,
                    v.edge_fingerprint, v.event_fingerprint
             FROM compute_tasks t
             JOIN scenarios s ON s.scenario_id = t.scenario_id
@@ -107,6 +110,7 @@ def build_comparison(conn, task_a_id: str, task_b_id: str) -> dict[str, Any]:
     common_denom_a = common_denom_b = 0.0
     common_covered_a = common_covered_b = 0.0
     common_unknown_a = common_unknown_b = 0.0
+    common_uncertain_a = common_uncertain_b = 0.0
 
     for gid in common:
         va, vb = view_a.get(gid, _empty_view()), view_b.get(gid, _empty_view())
@@ -118,6 +122,8 @@ def build_comparison(conn, task_a_id: str, task_b_id: str) -> dict[str, Any]:
         common_covered_b += vb["covered_pop"]
         common_unknown_a += va["unknown_pop"]
         common_unknown_b += vb["unknown_pop"]
+        common_uncertain_a += va["uncertain_pop"]
+        common_uncertain_b += vb["uncertain_pop"]
 
         was_covered = va["covered_pop"] > 0
         now_covered = vb["covered_pop"] > 0
@@ -131,6 +137,8 @@ def build_comparison(conn, task_a_id: str, task_b_id: str) -> dict[str, Any]:
             "population_b": pop_b,
             "covered_pop_a": round(va["covered_pop"], 3),
             "covered_pop_b": round(vb["covered_pop"], 3),
+            "uncertain_pop_a": round(va["uncertain_pop"], 3),
+            "uncertain_pop_b": round(vb["uncertain_pop"], 3),
             "unknown_pop_a": round(va["unknown_pop"], 3),
             "unknown_pop_b": round(vb["unknown_pop"], 3),
             "shelters_a": va["shelters"],
@@ -184,6 +192,8 @@ def build_comparison(conn, task_a_id: str, task_b_id: str) -> dict[str, Any]:
         warnings.append("分析边界不同：仅存在于单侧的网格已排除出共同分母，单列展示。")
     if not same_deadline:
         warnings.append("允许行程时长不同，比较口径不一致，请谨慎解读。")
+    if ctx_a.get("connection_version_id") != ctx_b.get("connection_version_id"):
+        warnings.append("两侧连接证据版本不同：覆盖差异可能来自人工确认/候选变更，已在网格明细中标注连接不确定变化。")
 
     return {
         "scenario_a": _ctx_brief(ctx_a),
@@ -196,6 +206,8 @@ def build_comparison(conn, task_a_id: str, task_b_id: str) -> dict[str, Any]:
             "covered_b": round(common_covered_b, 3),
             "unknown_a": round(common_unknown_a, 3),
             "unknown_b": round(common_unknown_b, 3),
+            "uncertain_a": round(common_uncertain_a, 3),
+            "uncertain_b": round(common_uncertain_b, 3),
             "coverage_rate_a": round(rate_a, 6),
             "coverage_rate_b": round(rate_b, 6),
             "rate_delta": round(rate_b - rate_a, 6),
@@ -217,6 +229,8 @@ def build_comparison(conn, task_a_id: str, task_b_id: str) -> dict[str, Any]:
             "same_population_basis": same_pop_basis,
             "same_deadline": same_deadline,
             "same_road_cutoff": ctx_a["road_cutoff"] == ctx_b["road_cutoff"],
+            "same_connection_version": ctx_a.get("connection_version_id")
+            == ctx_b.get("connection_version_id"),
         },
     }
 
@@ -253,7 +267,8 @@ def publish_comparison(conn, task_a_id: str, task_b_id: str, title: str, user: s
 
 
 def _empty_view() -> dict:
-    return {"covered_pop": 0.0, "uncovered_pop": 0.0, "unknown_pop": 0.0, "reasons": [], "shelters": []}
+    return {"covered_pop": 0.0, "uncovered_pop": 0.0, "uncertain_pop": 0.0,
+            "unknown_pop": 0.0, "reasons": [], "shelters": []}
 
 
 def _ctx_brief(ctx: dict) -> dict:
@@ -266,6 +281,7 @@ def _ctx_brief(ctx: dict) -> dict:
         "max_trip_minutes": ctx["max_trip_minutes"],
         "road_cutoff": ctx["road_cutoff"].isoformat(),
         "graph_version_id": ctx["graph_version_id"],
+        "connection_version_id": ctx.get("connection_version_id"),
         "evidence_cutoff_at": ctx["evidence_cutoff_at"].isoformat(),
         "stale": ctx["stale"],
         "summary": ctx["summary"],
@@ -282,6 +298,7 @@ def _full_manifest(ctx: dict) -> dict:
         "max_trip_minutes": ctx["max_trip_minutes"],
         "road_cutoff": ctx["road_cutoff"].isoformat(),
         "graph_version_id": ctx["graph_version_id"],
+        "connection_version_id": ctx.get("connection_version_id"),
         "edge_fingerprint": ctx["edge_fingerprint"],
         "event_fingerprint": ctx["event_fingerprint"],
         "grid_populations": {gid: g["population"] for gid, g in ctx["grids"].items()},

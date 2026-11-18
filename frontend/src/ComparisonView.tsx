@@ -106,6 +106,7 @@ export default function ComparisonView({
               <div className="stat"><div className="v">{(comp.common_denominator.coverage_rate_a * 100).toFixed(2)}% → {(comp.common_denominator.coverage_rate_b * 100).toFixed(2)}%</div><div className="k">共同口径覆盖率</div></div>
               <div className="stat"><div className="v">{(comp.common_denominator.rate_delta * 100).toFixed(2)}pp</div><div className="k">覆盖率变化</div></div>
               <div className="stat"><div className="v">{comp.common_denominator.unknown_a} → {comp.common_denominator.unknown_b}</div><div className="k">未知人口 A → B（不解释为零需求）</div></div>
+              <div className="stat"><div className="v" style={{ color: "var(--uncertain)" }}>{comp.common_denominator.uncertain_a} → {comp.common_denominator.uncertain_b}</div><div className="k">连接不确定人口 A → B</div></div>
               <div className="stat good"><div className="v">{comp.attribution.road_or_open_window_effect_population}</div><div className="k">道路/开放条件净效应（人）</div></div>
             </div>
           </div>
@@ -152,7 +153,7 @@ export default function ComparisonView({
               <table>
                 <thead>
                   <tr>
-                    <th>网格</th><th>分类</th><th>人口 A→B</th><th>覆盖 A→B</th><th>未知 A→B</th>
+                    <th>网格</th><th>分类</th><th>人口 A→B</th><th>覆盖 A→B</th><th>不确定 A→B</th><th>未知 A→B</th>
                     <th>安置点 A→B</th><th>B 侧原因</th>
                   </tr>
                 </thead>
@@ -163,6 +164,7 @@ export default function ComparisonView({
                       <td><span className={`pill ${g.classification === "newly_covered" ? "covered" : g.classification === "lost_coverage" ? "uncovered" : g.classification === "population_revised" ? "unknown" : "done"}`}>{g.classification}</span></td>
                       <td>{g.population_a} → {g.population_b}</td>
                       <td>{g.covered_pop_a} → {g.covered_pop_b}</td>
+                      <td>{g.uncertain_pop_a} → {g.uncertain_pop_b}</td>
                       <td>{g.unknown_pop_a} → {g.unknown_pop_b}</td>
                       <td className="small">{g.shelters_a.join(",") || "—"} → {g.shelters_b.join(",") || "—"}</td>
                       <td className="small warn">{g.reasons_b.join("；") || "—"}</td>

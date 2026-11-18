@@ -9,6 +9,7 @@
   --covered: #2fbf71;
   --uncovered: #f08c2e;
   --unknown: #9a7bd4;
+  --uncertain: #e8c33c;
   --stale: #e05260;
   --closure: #e05260;
   --speed: #e8c33c;
@@ -123,6 +124,10 @@ tr.clickable:hover { background: #22303f; }
 .pill.covered { background: rgba(47,191,113,.18); color: var(--covered); }
 .pill.uncovered { background: rgba(240,140,46,.18); color: var(--uncovered); }
 .pill.unknown { background: rgba(154,123,212,.2); color: var(--unknown); }
+.pill.uncertain { background: rgba(232,195,60,.16); color: var(--uncertain); }
+.pill.effective { background: rgba(47,191,113,.18); color: var(--covered); }
+.pill.weak { background: rgba(232,195,60,.16); color: var(--uncertain); }
+.pill.excluded { background: rgba(224,82,96,.18); color: var(--stale); }
 .pill.stale { background: rgba(224,82,96,.18); color: var(--stale); }
 .pill.done { background: rgba(77,163,255,.18); color: var(--accent); }
 

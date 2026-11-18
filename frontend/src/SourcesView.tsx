@@ -187,25 +187,31 @@ export default function SourcesView() {
             </div>
           </div>
           <div className="card scroll-x">
-            <h3>网格人口与互斥连接份额</h3>
+            <h3>网格人口与候选连接点（证据治理后）</h3>
             <table>
-              <thead><tr><th>网格</th><th>边界</th><th>当前人口(修订)</th><th>连接节点与互斥比例</th><th>比例合计</th></tr></thead>
+              <thead><tr><th>网格</th><th>边界</th><th>当前人口(修订)</th><th>候选连接点（方法/误差/权重/处置）</th><th>互斥比例合计</th></tr></thead>
               <tbody>
                 {grids.map((g) => {
                   const cs = connectors.filter((c) => c.grid_id === g.grid_id);
-                  const sum = cs.reduce((a, c) => a + c.allocation_ratio, 0);
+                  const sum = cs.reduce((a, c) => a + (c.allocation_ratio ?? 0), 0);
                   return (
                     <tr key={g.grid_id}>
                       <td className="mono">{g.grid_id}<div className="small muted">{g.name}</div></td>
                       <td>{g.boundary_id ?? "—"}</td>
                       <td>{g.population} <span className="small muted">(r{g.pop_revision})</span></td>
                       <td>{cs.length === 0
-                        ? <span className="warn small">无连接依据 → 未知</span>
+                        ? <span className="warn small">无候选连接点 → 未知</span>
                         : cs.map((c) => (
-                          <span key={c.node_id} className="path-chip">{c.node_id}：{(c.allocation_ratio * 100).toFixed(0)}%</span>
+                          <span key={c.candidate_id} className="path-chip" title={c.disposition_reason ?? ""}>
+                            {c.node_id}
+                            {c.allocation_ratio != null ? `：${(c.allocation_ratio * 100).toFixed(0)}%` : "：未配权重"}
+                            {`｜${c.locate_method}｜±${c.error_radius_m}m`}
+                            {c.crosses_barrier ? "｜跨河" : ""}
+                            {c.disposition === "excluded" ? "｜已排除" : c.disposition === "weak" ? "｜弱证据" : ""}
+                          </span>
                         ))}</td>
                       <td className={sum > 1 ? "warn" : sum < 1 ? "warn" : "good"}>
-                        {sum.toFixed(2)}{sum > 1 ? "（矛盾→未知）" : sum < 1 ? "（缺口→未知）" : ""}
+                        {sum.toFixed(2)}{sum > 1 ? "（矛盾→未知）" : sum < 1 ? "（缺口→未知或不确定）" : ""}
                       </td>
                     </tr>
                   );

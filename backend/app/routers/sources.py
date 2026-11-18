@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
 
+from ..services.connection import get_current_connection_version, resolve_connections
 from .deps import get_db, jsonable
 
 router = APIRouter(prefix="/sources", tags=["来源目录"])
@@ -82,7 +83,7 @@ def list_shelters(conn=Depends(get_db)):
 
 @router.get("/grids")
 def list_grids(as_of, conn=Depends(get_db)):
-    """网格 + 基准日可见人口修订 + 互斥连接份额（含分配依据来源）。"""
+    """网格 + 基准日可见人口修订 + 候选连接点（含定位方法、误差、审核处置与证据来源）。"""
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -104,9 +105,41 @@ def list_grids(as_of, conn=Depends(get_db)):
         grids = cur.fetchall()
         cur.execute(
             """SELECT c.*, d.title AS source_title
-               FROM grid_connectors c
+               FROM grid_connection_candidates c
                LEFT JOIN source_documents d ON d.doc_id = c.source_doc_id
-               ORDER BY c.grid_id, c.node_id"""
+               ORDER BY c.grid_id, c.candidate_id"""
         )
-        connectors = cur.fetchall()
-    return jsonable({"grids": grids, "connectors": connectors})
+        cand_rows = cur.fetchall()
+
+    # 当前连接版本下的处置状态（证据充分/弱证据/已排除）
+    version = get_current_connection_version(conn)
+    states = resolve_connections(conn, version["version_id"])
+    disposition_by_id = {}
+    for st in states.values():
+        for view in st["candidates"]:
+            disposition_by_id[view["candidate_id"]] = view
+
+    connectors = []
+    for c in cand_rows:
+        view = disposition_by_id.get(c["candidate_id"], {})
+        connectors.append({
+            "candidate_id": c["candidate_id"],
+            "grid_id": c["grid_id"],
+            "node_id": c["node_id"],
+            "allocation_ratio": view.get("allocation_ratio"),
+            "locate_method": c["locate_method"],
+            "error_radius_m": c["error_radius_m"],
+            "distance_to_node_m": c["distance_to_node_m"],
+            "road_class": c["road_class"],
+            "road_version_id": c["road_version_id"],
+            "crosses_barrier": c["crosses_barrier"],
+            "disposition": view.get("disposition"),
+            "disposition_reason": view.get("disposition_reason"),
+            "review_action": view.get("review_action"),
+            "source_title": c["source_title"],
+        })
+    return jsonable({
+        "grids": grids,
+        "connectors": connectors,
+        "connection_version_id": version["version_id"],
+    })

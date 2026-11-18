@@ -186,10 +186,10 @@ def load_snapshot(conn, version_id: int) -> GraphSnapshot:
 
 
 def load_population(conn, as_of: date) -> dict[str, dict]:
-    """按人口基准日取每网格最新可见修订，并附互斥连接份额。
+    """按人口基准日取每网格最新可见修订（仅人口分母，不含连接证据）。
 
-    返回 {grid_id: {population, geom, shares:[{node_id, ratio, share_pop}], ratio_sum}}。
-    无连接或比例不闭合的网格由覆盖服务单列 unknown。
+    连接证据由 services.connection.resolve_connections 按连接版本单独解析，
+    覆盖服务按 grid_id 合并两者——人口资料与连接证据是两条独立的版本线。
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -208,27 +208,9 @@ def load_population(conn, as_of: date) -> dict[str, dict]:
             (as_of,),
         )
         grids = cur.fetchall()
-        cur.execute(
-            """
-            SELECT DISTINCT ON (grid_id, node_id) grid_id, node_id, allocation_ratio
-            FROM grid_connectors
-            ORDER BY grid_id, node_id, revision_no DESC
-            """
-        )
-        connector_rows = cur.fetchall()
-
-    connectors: dict[str, list[dict]] = {}
-    for c in connector_rows:
-        connectors.setdefault(c["grid_id"], []).append(
-            {"node_id": c["node_id"], "ratio": float(c["allocation_ratio"])}
-        )
 
     result: dict[str, dict] = {}
     for g in grids:
-        shares = connectors.get(g["grid_id"], [])
-        ratio_sum = sum(s["ratio"] for s in shares)
-        for s in shares:
-            s["share_pop"] = float(g["population"]) * s["ratio"]
         result[g["grid_id"]] = {
             "grid_id": g["grid_id"],
             "name": g["name"],
@@ -237,8 +219,6 @@ def load_population(conn, as_of: date) -> dict[str, dict]:
             "boundary_id": g["boundary_id"],
             "population": float(g["population"]),
             "pop_revision": g["pop_revision"],
-            "shares": shares,
-            "ratio_sum": ratio_sum,
         }
     return result
 
@@ -249,8 +229,9 @@ def scenario_signature(
     max_trip_minutes: int,
     graph_version_id: int,
     boundary_id: Optional[str] = None,
+    connection_version_id: Optional[int] = None,
 ) -> str:
-    """完整情景签名：人口基准日 + 出发时刻 + 时限 + 路网版本 + 分析边界，缺一不可。"""
+    """完整情景签名：人口基准日 + 出发时刻 + 时限 + 路网版本 + 连接证据版本 + 分析边界。"""
     raw = json.dumps(
         [
             population_as_of.isoformat(),
@@ -258,6 +239,7 @@ def scenario_signature(
             int(max_trip_minutes),
             int(graph_version_id),
             boundary_id or "__ALL__",
+            int(connection_version_id or 0),
         ],
         ensure_ascii=False,
     )

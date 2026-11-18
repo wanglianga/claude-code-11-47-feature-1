@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import L from "leaflet";
 import type {
   ArrivalRow,
+  BarrierRow,
   EdgeRevision,
   NodeRow,
   ShareRow,
@@ -12,6 +13,7 @@ interface Props {
   nodes: NodeRow[];
   edges: EdgeRevision[];
   shelters: ShelterRow[];
+  barriers: BarrierRow[];
   shares: ShareRow[];
   arrivals: ArrivalRow[];
   witnessEdgeIds: string[];
@@ -22,14 +24,15 @@ interface Props {
 
 /**
  * 离线平面地图（L.CRS.Simple，单位米）。
- * 颜色纪律：底色元素一律中性灰；只有“计算结果”着色——网格按 covered/
- * uncovered/unknown 三态，边只在成为某网格见证路径时高亮，绝不以预设颜色
- * 代替路径分析结论。
+ * 颜色纪律：底色元素一律中性灰；只有“计算结果”着色——网格按 确定可达/
+ * 确定不可达/连接不确定/未知 四态，边只在成为某网格见证路径时高亮，
+ * 河流阻隔以中性蓝灰底图呈现，绝不以预设颜色代替路径分析结论。
  */
 export default function CoverageMap({
   nodes,
   edges,
   shelters,
+  barriers,
   shares,
   arrivals,
   witnessEdgeIds,
@@ -53,7 +56,7 @@ export default function CoverageMap({
     const m = new Map<string, ShareRow>();
     for (const s of shares) {
       const prev = m.get(s.grid_id);
-      const rank = { covered: 3, uncovered: 2, unknown: 1 };
+      const rank = { covered: 4, uncertain: 3, uncovered: 2, unknown: 1 };
       if (!prev || rank[s.status] > rank[prev.status]) m.set(s.grid_id, s);
     }
     return m;
@@ -89,6 +92,16 @@ export default function CoverageMap({
       [Math.min(...ys) - 600, Math.min(...xs) - 600],
       [Math.max(...ys) + 600, Math.max(...xs) + 600]
     );
+
+    // 河流阻隔：中性蓝灰底图（证据背景，不是计算结果）
+    for (const b of barriers) {
+      const line = L.polyline(
+        b.geometry.map(([x, y]) => latlng(x, y)),
+        { color: "#3d6b99", weight: 4, opacity: 0.55, dashArray: "8 6" }
+      );
+      line.bindPopup(`<b>${b.barrier_id}</b> ${b.name}<br/>空间阻隔：候选接入跨河判定依据`);
+      line.addTo(layer);
+    }
 
     // 有向边：中性灰底 + 方向箭头；见证路径边高亮
     const witnessSet = new Set(witnessEdgeIds);
@@ -161,7 +174,12 @@ export default function CoverageMap({
       const x = anyShare.geom_x;
       const y = anyShare.geom_y;
       if (x == null || y == null) continue;
-      const colorMap = { covered: "#2fbf71", uncovered: "#f08c2e", unknown: "#9a7bd4" } as const;
+      const colorMap = {
+        covered: "#2fbf71",
+        uncovered: "#f08c2e",
+        uncertain: "#e8c33c",
+        unknown: "#9a7bd4",
+      } as const;
       const selected = selectedGridId === gridId;
       const marker = L.circleMarker(latlng(x, y), {
         radius: selected ? 11 : 8,
@@ -183,6 +201,7 @@ export default function CoverageMap({
     nodes,
     edges,
     shelters,
+    barriers,
     shares,
     arrivals,
     witnessEdgeIds,

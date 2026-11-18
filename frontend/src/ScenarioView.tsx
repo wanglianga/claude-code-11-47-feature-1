@@ -3,6 +3,9 @@ import { api } from "./api";
 import CoverageMap from "./CoverageMap";
 import type {
   ArrivalRow,
+  BarrierRow,
+  CandidateResultRow,
+  CandidateView,
   EdgeRevision,
   NodeRow,
   ScenarioResult,
@@ -14,6 +17,22 @@ import type {
 const T0 = "2026-07-15T08:00:00+00:00";
 const C1 = "2026-07-15T07:30:00+00:00";
 const C2 = "2026-07-15T08:45:00+00:00";
+
+type WitnessData = {
+  shares: ShareRow[];
+  deps: string[];
+  candidateResults: CandidateResultRow[];
+  candidates: CandidateView[];
+  connectionVersionId: number | null;
+  boundsImpact: {
+    grid_uncertain_population: number;
+    counts_toward_upper_bound: boolean;
+    task_covered_lower: number;
+    task_covered_upper: number;
+    task_uncertain_population: number;
+    task_uncertain_potentially_covered: number;
+  } | null;
+};
 
 export default function ScenarioView({
   pushToast,
@@ -32,21 +51,20 @@ export default function ScenarioView({
   const [nodes, setNodes] = useState<NodeRow[]>([]);
   const [edges, setEdges] = useState<EdgeRevision[]>([]);
   const [shelters, setShelters] = useState<ShelterRow[]>([]);
+  const [barriers, setBarriers] = useState<BarrierRow[]>([]);
   const [result, setResult] = useState<ScenarioResult | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [shares, setShares] = useState<ShareRow[]>([]);
   const [arrivals, setArrivals] = useState<ArrivalRow[]>([]);
   const [selectedGrid, setSelectedGrid] = useState<string | null>(null);
-  const [witness, setWitness] = useState<{
-    shares: ShareRow[];
-    deps: string[];
-  } | null>(null);
+  const [witness, setWitness] = useState<WitnessData | null>(null);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     api.nodes().then((r) => setNodes(r.nodes)).catch(() => undefined);
     api.edges().then((r) => setEdges(r.edge_revisions)).catch(() => undefined);
     api.shelters().then((r) => setShelters(r.shelters)).catch(() => undefined);
+    api.barriers().then((r) => setBarriers(r.barriers)).catch(() => undefined);
   }, []);
 
   const loadTask = async (taskId: string) => {
@@ -89,6 +107,10 @@ export default function ScenarioView({
       setWitness({
         shares: w.shares,
         deps: w.task_edge_dependencies.map((d) => d.edge_id),
+        candidateResults: w.candidate_results,
+        candidates: w.candidates,
+        connectionVersionId: w.connection_version_id,
+        boundsImpact: w.bounds_impact,
       });
     } catch (e) {
       pushToast(String(e), "error");
@@ -117,7 +139,7 @@ export default function ScenarioView({
   }, [arrivals, witness, witnessEdgeIds, selectedGrid]);
 
   const statusCount = useMemo(() => {
-    const c = { covered: 0, uncovered: 0, unknown: 0 };
+    const c = { covered: 0, uncovered: 0, uncertain: 0, unknown: 0 };
     const seen = new Set<string>();
     for (const s of shares) {
       if (seen.has(s.grid_id + s.status)) continue;
@@ -212,18 +234,27 @@ export default function ScenarioView({
               {result.message}
             </div>
             {summary && (
-              <div className="stat-grid">
-                <div className="stat"><div className="v">{summary.total_population}</div><div className="k">边界内总人口（分母）</div></div>
-                <div className="stat"><div className="v">{summary.located_population}</div><div className="k">可定位人口</div></div>
-                <div className="stat good"><div className="v">{summary.covered_population}</div><div className="k">覆盖人口（去重）</div></div>
-                <div className="stat warn"><div className="v">{summary.uncovered_population}</div><div className="k">可定位但未覆盖</div></div>
-                <div className="stat"><div className="v" style={{ color: "var(--unknown)" }}>{summary.unknown_population}</div><div className="k">未知（单列）</div></div>
-                <div className="stat"><div className="v">{summary.covered_grid_count}</div><div className="k">覆盖网格数</div></div>
-              </div>
+              <>
+                <div className="stat-grid">
+                  <div className="stat"><div className="v">{summary.total_population}</div><div className="k">边界内总人口（分母）</div></div>
+                  <div className="stat good"><div className="v">{summary.covered_population}</div><div className="k">确定可达（下界）</div></div>
+                  <div className="stat"><div className="v" style={{ color: "var(--shelter)" }}>{summary.covered_upper_population}</div><div className="k">覆盖上界（含不确定可达）</div></div>
+                  <div className="stat warn"><div className="v">{summary.uncovered_population}</div><div className="k">确定不可达</div></div>
+                  <div className="stat"><div className="v" style={{ color: "var(--uncertain)" }}>{summary.uncertain_population}</div><div className="k">连接不确定（其中 {summary.uncertain_potentially_covered} 可达上界）</div></div>
+                  <div className="stat"><div className="v" style={{ color: "var(--unknown)" }}>{summary.unknown_population}</div><div className="k">未知（单列）</div></div>
+                </div>
+                <div className="small muted" style={{ marginTop: 6 }}>
+                  人口守恒：{summary.covered_population} + {summary.uncovered_population} +{" "}
+                  {summary.uncertain_population} + {summary.unknown_population} ={" "}
+                  {summary.total_population}；确定分类人口 {summary.located_population}，
+                  不确定网格 {summary.uncertain_grid_count} 个。
+                </div>
+              </>
             )}
             <div className="legend">
-              <span><i style={{ background: "var(--covered)" }} />覆盖 {statusCount.covered}</span>
-              <span><i style={{ background: "var(--uncovered)" }} />未覆盖 {statusCount.uncovered}</span>
+              <span><i style={{ background: "var(--covered)" }} />确定可达 {statusCount.covered}</span>
+              <span><i style={{ background: "var(--uncovered)" }} />确定不可达 {statusCount.uncovered}</span>
+              <span><i style={{ background: "var(--uncertain)" }} />连接不确定 {statusCount.uncertain}</span>
               <span><i style={{ background: "var(--unknown)" }} />未知 {statusCount.unknown}</span>
               <span><i style={{ background: "var(--shelter)" }} />安置点</span>
               <span><i style={{ background: "#e8c33c" }} />见证路径边</span>
@@ -246,7 +277,12 @@ export default function ScenarioView({
 
         {witness && selectedGrid && (
           <div className="card">
-            <h3>下钻：{selectedGrid} 的互斥份额与证据</h3>
+            <h3>
+              下钻：{selectedGrid} 的份额与连接证据
+              {witness.connectionVersionId != null && (
+                <span className="small muted">（连接版本 v{witness.connectionVersionId}）</span>
+              )}
+            </h3>
             <table>
               <thead>
                 <tr><th>份额</th><th>连接节点</th><th>人口</th><th>状态/原因</th><th>到发与等待</th></tr>
@@ -280,6 +316,68 @@ export default function ScenarioView({
                 ))}
               </tbody>
             </table>
+
+            {witness.candidates.length > 0 && (
+              <>
+                <h3 style={{ marginTop: 12 }}>候选连接点与排除原因</h3>
+                <table>
+                  <thead>
+                    <tr><th>节点</th><th>定位方法</th><th>误差(m)</th><th>道路</th><th>跨河</th><th>处置</th><th>路径评估</th></tr>
+                  </thead>
+                  <tbody>
+                    {witness.candidates.map((c) => {
+                      const ev = witness.candidateResults.find(
+                        (r) => r.candidate_id === c.candidate_id
+                      );
+                      return (
+                        <tr key={c.candidate_id}>
+                          <td className="mono">{c.node_id}</td>
+                          <td className="small">{c.locate_method}</td>
+                          <td>{c.error_radius_m}</td>
+                          <td className="small">{c.road_class ?? "—"}</td>
+                          <td>{c.crosses_barrier ? <span className="warn">是</span> : "否"}</td>
+                          <td>
+                            <span className={`pill ${c.disposition}`}>{c.disposition}</span>
+                            {c.disposition_reason && (
+                              <div className="small muted">{c.disposition_reason}</div>
+                            )}
+                          </td>
+                          <td className="small">
+                            {ev ? (
+                              ev.exclusion_reason ? (
+                                <span className="warn">{ev.exclusion_reason}</span>
+                              ) : ev.reachable ? (
+                                <span className="good">
+                                  可达 → {ev.shelter_id}（{ev.arrival_time?.replace("T", " ").slice(11, 16)}）
+                                </span>
+                              ) : (
+                                <span className="warn">不可达</span>
+                              )
+                            ) : c.disposition === "excluded" ? (
+                              <span className="muted">未参与路径计算</span>
+                            ) : (
+                              <span className="muted">确定份额（见上表）</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </>
+            )}
+
+            {witness.boundsImpact && (
+              <div className="evidence" style={{ marginTop: 8 }}>
+                该网格连接不确定人口 <b>{witness.boundsImpact.grid_uncertain_population}</b>（只计一次）：
+                {witness.boundsImpact.counts_toward_upper_bound
+                  ? "任一候选可达 → 计入覆盖上界"
+                  : "无候选可达 → 不计入覆盖上界"}
+                ；全任务覆盖下界 {witness.boundsImpact.task_covered_lower}，
+                上界 {witness.boundsImpact.task_covered_upper}。
+              </div>
+            )}
+
             <div className="small muted" style={{ marginTop: 6 }}>
               任务依赖边（封路修订沿此定位）：
               <div>{witness.deps.map((e) => <span key={e} className="path-chip">{e}</span>)}</div>
@@ -293,6 +391,7 @@ export default function ScenarioView({
           nodes={nodes}
           edges={edges}
           shelters={shelters}
+          barriers={barriers}
           shares={shares}
           arrivals={arrivals}
           witnessEdgeIds={witnessEdgeIds}
